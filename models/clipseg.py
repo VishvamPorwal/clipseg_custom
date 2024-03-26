@@ -20,7 +20,7 @@ def get_prompt_list(prompt):
                             'a cropped photo of a {}.', 'a good photo of a {}.', 'a photo of one {}.',
                             'a bad photo of a {}.', 'a photo of the {}.']
     elif prompt == 'satellite':
-        return ['a centered satellite image of a {}.']
+        return ['A centered satellite image of a {}.']
     else:
         raise ValueError('Invalid value for prompt')        
 
@@ -31,9 +31,7 @@ class CLIPDenseBase(nn.Module):
     def __init__(self, version, reduce_cond, reduce_dim, prompt, n_tokens):
         super().__init__()
 
-        import sys
-        sys.path.append('/Users/vishvamporwal/Documents/data/uog_student/neural_networks/project/trainclip_scratch')
-        from models.models_clip import ClipModel
+        from models.clip import ClipModel
         path_to_model = '/Users/vishvamporwal/Documents/data/uog_student/neural_networks/project/checkpoints/dinov2small+mobilebert/model.ckpt'
         self.image_encoder_alias = "facebook/dinov2-small"
         self.text_encoder_alias = "google/mobilebert-uncased"
