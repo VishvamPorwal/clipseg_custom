@@ -5,6 +5,8 @@ from torch import nn
 from torch.nn import functional as nnf
 from torch.nn.modules.activation import ReLU
 
+projection_dim = 256
+image_dim = 384
 
 def get_prompt_list(prompt):
     if prompt == 'plain':
@@ -17,62 +19,11 @@ def get_prompt_list(prompt):
         return ['a photo of a {}.', 'a photograph of a {}.', 'an image of a {}.', '{}.',
                             'a cropped photo of a {}.', 'a good photo of a {}.', 'a photo of one {}.',
                             'a bad photo of a {}.', 'a photo of the {}.']
+    elif prompt == 'satellite':
+        return ['a centered satellite image of a {}.']
     else:
         raise ValueError('Invalid value for prompt')        
 
-
-def forward_multihead_attention(x, b, with_aff=False, attn_mask=None):
-    """ 
-    Simplified version of multihead attention (taken from torch source code but without tons of if clauses). 
-    The mlp and layer norm come from CLIP.
-    x: input.
-    b: multihead attention module. 
-    """
-
-    x_ = b.ln_1(x)
-    q, k, v = nnf.linear(x_, b.attn.in_proj_weight, b.attn.in_proj_bias).chunk(3, dim=-1)
-    tgt_len, bsz, embed_dim = q.size()
-
-    head_dim = embed_dim // b.attn.num_heads
-    scaling = float(head_dim) ** -0.5
-
-    q = q.contiguous().view(tgt_len, bsz * b.attn.num_heads, b.attn.head_dim).transpose(0, 1)
-    k = k.contiguous().view(-1, bsz * b.attn.num_heads, b.attn.head_dim).transpose(0, 1)
-    v = v.contiguous().view(-1, bsz * b.attn.num_heads, b.attn.head_dim).transpose(0, 1)
-
-    q = q * scaling
-
-    attn_output_weights = torch.bmm(q, k.transpose(1, 2)) #  n_heads * batch_size, tokens^2, tokens^2
-    if attn_mask is not None:
-
-
-        attn_mask_type, attn_mask = attn_mask
-        n_heads = attn_output_weights.size(0) // attn_mask.size(0)
-        attn_mask = attn_mask.repeat(n_heads, 1)
-        
-        if attn_mask_type == 'cls_token':
-            # the mask only affects similarities compared to the readout-token.
-            attn_output_weights[:, 0, 1:] = attn_output_weights[:, 0, 1:] * attn_mask[None,...]
-            # attn_output_weights[:, 0, 0] = 0*attn_output_weights[:, 0, 0]
-
-        if attn_mask_type == 'all':
-            # print(attn_output_weights.shape, attn_mask[:, None].shape)
-            attn_output_weights[:, 1:, 1:] = attn_output_weights[:, 1:, 1:] * attn_mask[:, None]
-        
-    
-    attn_output_weights = torch.softmax(attn_output_weights, dim=-1)
-
-    attn_output = torch.bmm(attn_output_weights, v)
-    attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
-    attn_output = b.attn.out_proj(attn_output)
-
-    x = x + attn_output
-    x = x + b.mlp(b.ln_2(x))
-
-    if with_aff:
-        return x, attn_output_weights
-    else:
-        return x
 
 
 class CLIPDenseBase(nn.Module):
@@ -80,11 +31,15 @@ class CLIPDenseBase(nn.Module):
     def __init__(self, version, reduce_cond, reduce_dim, prompt, n_tokens):
         super().__init__()
 
-        import clip
-
-        # prec = torch.FloatTensor
-        self.clip_model, _ = clip.load(version, device='cpu', jit=False)
-        self.model = self.clip_model.visual
+        import sys
+        sys.path.append('/Users/vishvamporwal/Documents/data/uog_student/neural_networks/project/trainclip_scratch')
+        from models.models_clip import ClipModel
+        path_to_model = '/Users/vishvamporwal/Documents/data/uog_student/neural_networks/project/checkpoints/dinov2small+mobilebert/model.ckpt'
+        self.image_encoder_alias = "facebook/dinov2-small"
+        self.text_encoder_alias = "google/mobilebert-uncased"
+        self.clip_model = ClipModel(self.image_encoder_alias, self.text_encoder_alias, image_embedding_dims = 384, text_embedding_dims=512)
+        self.clip_model.load_from_checkpoint(path_to_model)
+        self.model = self.clip_model.image_encoder
 
         # if not None, scale conv weights such that we obtain n_tokens.
         self.n_tokens = n_tokens
@@ -94,16 +49,16 @@ class CLIPDenseBase(nn.Module):
 
         # conditional
         if reduce_cond is not None:
-            self.reduce_cond = nn.Linear(512, reduce_cond)
+            self.reduce_cond = nn.Linear(projection_dim, reduce_cond)
             for p in self.reduce_cond.parameters():
                 p.requires_grad_(False)
         else:
             self.reduce_cond = None        
 
-        self.film_mul = nn.Linear(512 if reduce_cond is None else reduce_cond, reduce_dim)
-        self.film_add = nn.Linear(512 if reduce_cond is None else reduce_cond, reduce_dim)
+        self.film_mul = nn.Linear(projection_dim if reduce_cond is None else reduce_cond, reduce_dim)
+        self.film_add = nn.Linear(projection_dim if reduce_cond is None else reduce_cond, reduce_dim)
         
-        self.reduce = nn.Linear(768, reduce_dim)
+        self.reduce = nn.Linear(image_dim, reduce_dim)
 
         self.prompt_list = get_prompt_list(prompt)     
 
@@ -118,78 +73,26 @@ class CLIPDenseBase(nn.Module):
     def rescaled_pos_emb(self, new_size):
         assert len(new_size) == 2
 
-        a = self.model.positional_embedding[1:].T.view(1, 768, *self.token_shape)
-        b = nnf.interpolate(a, new_size, mode='bicubic', align_corners=False).squeeze(0).view(768, new_size[0]*new_size[1]).T
-        return torch.cat([self.model.positional_embedding[:1], b])
+        a = self.model.encoder.pos_embed[1:].T.view(1, image_dim, *self.token_shape) #TODO:Token shape
+        b = nnf.interpolate(a, new_size, mode='bicubic', align_corners=False).squeeze(0).view(image_dim, new_size[0]*new_size[1]).T
+        return torch.cat([self.model.encoder.pos_embed[:1], b])
 
     def visual_forward(self, x_inp, extract_layers=(), skip=False, mask=None):
         
 
         with torch.no_grad():
+            x = self.model.encoder.prepare_tokens_with_masks(x_inp, mask)
 
-            inp_size = x_inp.shape[2:]
-
-            if self.n_tokens is not None:
-                stride2 = x_inp.shape[2] // self.n_tokens
-                conv_weight2 = nnf.interpolate(self.model.conv1.weight, (stride2, stride2), mode='bilinear', align_corners=True)
-                x = nnf.conv2d(x_inp, conv_weight2, bias=self.model.conv1.bias, stride=stride2, dilation=self.model.conv1.dilation)
-            else:
-                x = self.model.conv1(x_inp)  # shape = [*, width, grid, grid]
-
-            x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
-            x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-
-            x = torch.cat([self.model.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
-
-            standard_n_tokens = 50 if self.model.conv1.kernel_size[0] == 32 else 197
-
-            if x.shape[1] != standard_n_tokens:
-                new_shape = int(math.sqrt(x.shape[1]-1))
-                x = x + self.rescaled_pos_emb((new_shape, new_shape)).to(x.dtype)[None,:,:]
-            else:
-                x = x + self.model.positional_embedding.to(x.dtype)
-
-            x = self.model.ln_pre(x)
-
-            x = x.permute(1, 0, 2)  # NLD -> LND
-
-            activations, affinities = [], []
-            for i, res_block in enumerate(self.model.transformer.resblocks):
-                
-                if mask is not None:
-                    mask_layer, mask_type, mask_tensor = mask
-                    if mask_layer == i or mask_layer == 'all':
-                        # import ipdb; ipdb.set_trace()
-                        size = int(math.sqrt(x.shape[0] - 1))
-                        
-                        attn_mask = (mask_type, nnf.interpolate(mask_tensor.unsqueeze(1).float(), (size, size)).view(mask_tensor.shape[0], size * size))
-                        
-                    else:
-                        attn_mask = None
-                else:
-                    attn_mask = None
-
-                x, aff_per_head = forward_multihead_attention(x, res_block, with_aff=True, attn_mask=attn_mask)
-
+            activations = []
+            for i, blk in enumerate(self.model.encoder.blocks):
+                x = blk(x)
                 if i in extract_layers:
-                    affinities += [aff_per_head]
-
-                    #if self.n_tokens is not None:
-                    #    activations += [nnf.interpolate(x, inp_size, mode='bilinear', align_corners=True)]
-                    #else:
                     activations += [x]
 
-                if len(extract_layers) > 0 and i == max(extract_layers) and skip:
-                    print('early skip')
-                    break
+            x = self.model.encoder.norm(x)
+            return x, activations, None
+
                 
-            x = x.permute(1, 0, 2)  # LND -> NLD
-            x = self.model.ln_post(x[:, 0, :])
-
-            if self.model.proj is not None:
-                x = x @ self.model.proj
-
-            return x, activations, affinities
 
     def sample_prompts(self, words, prompt_list=None):
 
@@ -223,19 +126,19 @@ class CLIPDenseBase(nn.Module):
         return cond   
 
     def compute_conditional(self, conditional):
-        import clip
-
         dev = next(self.parameters()).device
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(self.text_encoder_alias)
 
         if type(conditional) in {list, tuple}:
-            text_tokens = clip.tokenize(conditional).to(dev)
-            cond = self.clip_model.encode_text(text_tokens)
+            text_tokens = tokenizer(conditional, return_tensors='pt').to(dev)
+            cond = self.clip_model.text_encoder(input_ids = text_tokens['input_ids'], attention_mask = text_tokens['attention_mask'])
         else:
             if conditional in self.precomputed_prompts:
                 cond = self.precomputed_prompts[conditional].float().to(dev)
             else:
-                text_tokens = clip.tokenize([conditional]).to(dev)
-                cond = self.clip_model.encode_text(text_tokens)[0]
+                text_tokens = tokenizer(conditional, return_tensors='pt').to(dev)
+                cond = self.clip_model.text_encoder(input_ids = text_tokens['input_ids'], attention_mask = text_tokens['attention_mask'])
         
         if self.shift_vector is not None:
             return cond + self.shift_vector
@@ -251,7 +154,7 @@ def clip_load_untrained(version):
     state_dict = model.state_dict()
 
     vision_width = state_dict["visual.conv1.weight"].shape[0]
-    vision_layers = len([k for k in state_dict.keys() if k.startswith("visual.") and k.endswith(".attn.in_proj_weight")])
+    vision_layers = len([k for k in state_dict.keys() if k.startswith("visual.") and k.endswith(".attn.qkv.weight")])
     vision_patch_size = state_dict["visual.conv1.weight"].shape[-1]
     grid_size = round((state_dict["visual.positional_embedding"].shape[0] - 1) ** 0.5)
     image_resolution = vision_patch_size * grid_size
@@ -268,7 +171,7 @@ def clip_load_untrained(version):
 
 class CLIPDensePredT(CLIPDenseBase):
 
-    def __init__(self, version='ViT-B/32', extract_layers=(3, 6, 9), cond_layer=0, reduce_dim=128, n_heads=4, prompt='fixed', 
+    def __init__(self, version='ViT-B/32', extract_layers=(3, 6, 9), cond_layer=0, reduce_dim=128, n_heads=4, prompt='satellite', 
                  extra_blocks=0, reduce_cond=None, fix_shift=False,
                  learn_trans_conv_only=False,  limit_to_clip_only=False, upsample=False, 
                  add_calibration=False, rev_activations=False, trans_conv=None, n_tokens=None, complex_trans_conv=False):
@@ -293,7 +196,7 @@ class CLIPDensePredT(CLIPDenseBase):
 
         self.version = version
         
-        self.token_shape = {'ViT-B/32': (7, 7), 'ViT-B/16': (14, 14)}[version]
+        self.token_shape = {'ViT-B/32': (7, 7), 'ViT-B/16': (14, 14), 'dinov2-small': (16, 16)}[version] # TODO: Doesnt matter, because we are not rescaling pos embed
 
         if fix_shift:
             # self.shift_vector = nn.Parameter(torch.load(join(dirname(basename(__file__)), 'clip_text_shift_vector.pth')), requires_grad=False)
@@ -303,7 +206,7 @@ class CLIPDensePredT(CLIPDenseBase):
             self.shift_vector = None
 
         if trans_conv is None:
-            trans_conv_ks = {'ViT-B/32': (32, 32), 'ViT-B/16': (16, 16)}[version]
+            trans_conv_ks = {'ViT-B/32': (32, 32), 'ViT-B/16': (16, 16), 'dinov2-small': (14, 14)}[version]
         else:
             # explicitly define transposed conv kernel size
             trans_conv_ks = (trans_conv, trans_conv)
@@ -327,7 +230,7 @@ class CLIPDensePredT(CLIPDenseBase):
         
         assert len(self.extract_layers) == depth
 
-        self.reduces = nn.ModuleList([nn.Linear(768, reduce_dim) for _ in range(depth)])
+        self.reduces = nn.ModuleList([nn.Linear(image_dim, reduce_dim) for _ in range(depth)])
         self.blocks = nn.ModuleList([nn.TransformerEncoderLayer(d_model=reduce_dim, nhead=n_heads) for _ in range(len(self.extract_layers))])
         self.extra_blocks = nn.ModuleList([nn.TransformerEncoderLayer(d_model=reduce_dim, nhead=n_heads) for _ in range(extra_blocks)])
         
@@ -347,7 +250,7 @@ class CLIPDensePredT(CLIPDenseBase):
 
         assert type(return_features) == bool
 
-        inp_image = inp_image.to(self.model.positional_embedding.device)
+        inp_image = inp_image.to(self.model.encoder.pos_embed.device)
 
         if mask is not None:
             raise ValueError('mask not supported')
@@ -466,7 +369,7 @@ class CLIPDenseBaseline(CLIPDenseBase):
 
     def forward(self, inp_image, conditional=None, return_features=False):
 
-        inp_image = inp_image.to(self.model.positional_embedding.device)
+        inp_image = inp_image.to(self.model.encoder.pos_embed.device)
 
         # x_inp = normalize(inp_image)
         x_inp = inp_image
