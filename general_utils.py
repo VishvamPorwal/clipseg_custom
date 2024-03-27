@@ -16,8 +16,8 @@ class Logger(object):
 log = Logger()
 
 def training_config_from_cli_args():
-    experiment_name = sys.argv[1]
-    experiment_id = int(sys.argv[2])
+    experiment_name = 'phrasecut.yaml'
+    experiment_id = 0
 
     yaml_config = yaml.load(open(f'experiments/{experiment_name}'), Loader=yaml.SafeLoader)
 

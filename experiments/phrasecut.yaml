@@ -19,8 +19,8 @@ configuration:
   dataset: datasets.phrasecut.PhraseCut   # <-----------------
   split_mode: pascal_test
   split: train
-  mask: text_and_crop_blur_highlight352
-  image_size: 352
+  mask: text_and_crop_blur_highlight336
+  image_size: 336
   normalize: True
   pre_crop_image_size: [sample, 1, 1.5]
   aug: 1new
@@ -43,7 +43,7 @@ configuration:
 
 test_configuration_common:
   normalize: True
-  image_size: 352
+  image_size: 336
   batch_size: 32
   # max_iterations: 5
   # max_iterations: 150
@@ -68,7 +68,7 @@ individual_configurations:
 # important ones
 
 
-- {name: rd64-uni, version: 'ViT-B/16', reduce_dim: 64, with_visual: True, negative_prob: 0.2, mix: True, mix_text_max: 0.5}
+- {name: rd64-uni, version: 'dinov2-small', reduce_dim: 64, with_visual: True, negative_prob: 0.2, mix: False, mix_text_max: 0.5}
 
 # this is almost the same training setting as the refined model except for transformer dropout of 0.1 (currently not implemented in the model)
 - {name: rd64-uni-refined, version: 'ViT-B/16', reduce_dim: 64, negative_prob: 0.2,  complex_trans_conv: True, with_visual: True, mix: True, mix_text_max: 0.5, T_max: 50000, max_iterations: 50000}

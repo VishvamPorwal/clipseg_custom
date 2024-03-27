@@ -43,7 +43,10 @@ def blend_image_segmentation(img, seg, mode, image_size=224):
         out  = [img_preprocess((None, [img], [seg]), blur=3, center_context=0.1, bg_fac=0.1, image_size=image_size)[0].numpy()]  
     elif mode == 'crop_blur_highlight352':
         from evaluation_utils import img_preprocess
-        out  = [img_preprocess((None, [img], [seg]), blur=3, center_context=0.1, bg_fac=0.1, image_size=352)[0].numpy()]          
+        out  = [img_preprocess((None, [img], [seg]), blur=3, center_context=0.1, bg_fac=0.1, image_size=352)[0].numpy()]    
+    elif mode == 'crop_blur_highlight336':
+        from evaluation_utils import img_preprocess
+        out  = [img_preprocess((None, [img], [seg]), blur=3, center_context=0.1, bg_fac=0.1, image_size=336)[0].numpy()]         
     elif mode == 'shape':
         out = [np.stack([seg[:, :]]*3).astype('float32')]
     elif mode == 'concat':

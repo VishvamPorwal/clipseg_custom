@@ -33,7 +33,7 @@ def validate(model, dataset, config):
     loss_fn = get_attribute(config.loss)
 
     model.eval()
-    model.cuda()
+    model.to(device)
 
     if metric_class is not None:
         metric = get_attribute(metric_class)()
@@ -43,8 +43,8 @@ def validate(model, dataset, config):
         i, losses = 0, []
         for data_x, data_y in data_loader:
 
-            data_x = [x.cuda() if isinstance(x, torch.Tensor) else x for x in data_x]
-            data_y = [x.cuda() if isinstance(x, torch.Tensor) else x for x in data_y]
+            data_x = [x.to(device) if isinstance(x, torch.Tensor) else x for x in data_x]
+            data_y = [x.to(device) if isinstance(x, torch.Tensor) else x for x in data_y]
 
             prompts = model.sample_prompts(data_x[1], prompt_list=('a centered satellite image of a {}',))
             pred, visual_q, _, _  = model(data_x[0], prompts, return_features=True)
@@ -71,11 +71,13 @@ def validate(model, dataset, config):
 def main():
     config = training_config_from_cli_args()
 
+    device = 'cuda' if torch.cuda.is_available() else 'mps'
+
     val_interval, best_val_loss, best_val_score = config.val_interval, float('inf'), float('-inf')
 
     model_cls = get_attribute(config.model)
     _, model_args, _ = filter_args(config, inspect.signature(model_cls).parameters)
-    model = model_cls(**model_args).cuda()
+    model = model_cls(**model_args).to(device)
 
     dataset_cls = get_attribute(config.dataset)
     _, dataset_args, _ = filter_args(config, inspect.signature(dataset_cls).parameters)
@@ -131,7 +133,7 @@ def main():
     with TrainingLogger(log_dir=config.name, model=model, config=tracker_config) as logger:
 
         i = 0
-        while True:
+        for epoch in range(10):
             for data_x, data_y in data_loader:
 
                 # between caption and output feature.
@@ -150,19 +152,19 @@ def main():
                         # model.clip_model()
 
                         text_cond = model.compute_conditional(prompts)
-                        visual_s_cond, _, _ = model.visual_forward(data_x[2].cuda())
+                        visual_s_cond, _, _ = model.visual_forward(data_x[2].to(device))
 
                     max_txt = config.mix_text_max if config.mix_text_max is not None else 1
                     batch_size = text_cond.shape[0]
 
                     # sample weights for each element in batch
                     text_weights = torch.distributions.Uniform(config.mix_text_min, max_txt).sample((batch_size,))[:, None]
-                    text_weights = text_weights.cuda()
+                    text_weights = text_weights.to(device)
 
                     if dataset.__class__.__name__ == 'PhraseCut':
                         # give full weight to text where support_image is invalid
                         visual_is_valid = data_x[4] if model.__class__.__name__ == 'CLIPDensePredTMasked' else data_x[3]
-                        text_weights = torch.max(text_weights[:,0], 1 - visual_is_valid.float().cuda()).unsqueeze(1)
+                        text_weights = torch.max(text_weights[:,0], 1 - visual_is_valid.float().to(device)).unsqueeze(1)
 
                     cond = text_cond * text_weights + visual_s_cond * (1 - text_weights)
 
@@ -173,18 +175,18 @@ def main():
                         # compute conditional vector using CLIP masking
                         with autocast_fn():
                             assert config.mask == 'separate'
-                            cond, _, _ = model.visual_forward_masked(data_x[1].cuda(), data_x[2].cuda())
+                            cond, _, _ = model.visual_forward_masked(data_x[1].to(device), data_x[2].to(device))
                     else:
                         cond = data_x[1]
                         if isinstance(cond, torch.Tensor):
-                            cond = cond.cuda()
+                            cond = cond.to(device)
 
                 with autocast_fn():
                     visual_q = None
 
-                    pred, visual_q, _, _  = model(data_x[0].cuda(), cond, return_features=True)
+                    pred, visual_q, _, _  = model(data_x[0].to(device), cond, return_features=True)
 
-                    loss = loss_fn(pred, data_y[0].cuda())
+                    loss = loss_fn(pred, data_y[0].to(device))
 
                     if torch.isnan(loss) or torch.isinf(loss):
                         # skip if loss is nan

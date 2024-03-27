@@ -254,7 +254,7 @@ class PhraseCut(object):
 
         self.sample_ids = [self.sample_ids[i] for i in range(len(self.sample_ids)) if self.sizes[i] > min_size]
 
-        self.base_path = join(expanduser('~/datasets/PhraseCut/VGPhraseCut_v0/images/'))
+        self.base_path = 'third_party/PhraseCutDataset/data/VGPhraseCut_v0/images/'
 
     def __len__(self):
         return len(self.sample_ids)

@@ -32,11 +32,10 @@ class CLIPDenseBase(nn.Module):
         super().__init__()
 
         from models.clip import ClipModel
-        path_to_model = '/Users/vishvamporwal/Documents/data/uog_student/neural_networks/project/checkpoints/dinov2small+mobilebert/model.ckpt'
+        path_to_model = 'model.ckpt'
         self.image_encoder_alias = "facebook/dinov2-small"
         self.text_encoder_alias = "google/mobilebert-uncased"
-        self.clip_model = ClipModel(self.image_encoder_alias, self.text_encoder_alias, image_embedding_dims = 384, text_embedding_dims=512)
-        self.clip_model.load_from_checkpoint(path_to_model)
+        self.clip_model = ClipModel.load_from_checkpoint(path_to_model)
         self.model = self.clip_model.image_encoder
 
         # if not None, scale conv weights such that we obtain n_tokens.
@@ -53,8 +52,8 @@ class CLIPDenseBase(nn.Module):
         else:
             self.reduce_cond = None        
 
-        self.film_mul = nn.Linear(projection_dim if reduce_cond is None else reduce_cond, reduce_dim)
-        self.film_add = nn.Linear(projection_dim if reduce_cond is None else reduce_cond, reduce_dim)
+        self.film_mul = nn.Linear(512 if reduce_cond is None else reduce_cond, reduce_dim)
+        self.film_add = nn.Linear(512 if reduce_cond is None else reduce_cond, reduce_dim)
         
         self.reduce = nn.Linear(image_dim, reduce_dim)
 
@@ -129,13 +128,13 @@ class CLIPDenseBase(nn.Module):
         tokenizer = AutoTokenizer.from_pretrained(self.text_encoder_alias)
 
         if type(conditional) in {list, tuple}:
-            text_tokens = tokenizer(conditional, return_tensors='pt').to(dev)
+            text_tokens = tokenizer(conditional, return_tensors='pt', padding=True, truncation=True, max_length=500).to(dev)
             cond = self.clip_model.text_encoder(input_ids = text_tokens['input_ids'], attention_mask = text_tokens['attention_mask'])
         else:
             if conditional in self.precomputed_prompts:
                 cond = self.precomputed_prompts[conditional].float().to(dev)
             else:
-                text_tokens = tokenizer(conditional, return_tensors='pt').to(dev)
+                text_tokens = tokenizer(conditional, return_tensors='pt', padding=True, truncation=True, max_length=500).to(dev)
                 cond = self.clip_model.text_encoder(input_ids = text_tokens['input_ids'], attention_mask = text_tokens['attention_mask'])
         
         if self.shift_vector is not None:
@@ -269,7 +268,7 @@ class CLIPDensePredT(CLIPDenseBase):
 
         a = None
         for i, (activation, block, reduce) in enumerate(zip(_activations, self.blocks, self.reduces)):
-            
+            activation = activation.view(activation.shape[1], bs, -1)
             if a is not None:
                 a = reduce(activation) + a
             else:
